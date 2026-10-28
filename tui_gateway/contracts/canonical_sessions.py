@@ -159,6 +159,10 @@ class CanonicalSnapshot(Result):
     todo_state: TodoState | None = None
     # The owner's server→client requests still unanswered (``session_server_requests.open_requests``).
     open_requests: list[OpenRequestEntry] | None = None
+    # How many pictures (``prompt.submit`` ``attachments``) one prompt may carry; a longer list is
+    # refused ``too_many_attachments`` with ``limit`` and ``count`` in ``error.data``. Absent from
+    # older gateways.
+    attachment_limit: int | None = None
 
 
 class CanonicalListParams(ProfileParams):

@@ -120,7 +120,10 @@ _media_root = native_inputs_root
 # commits them as immutable bytes at admission so no later mutation or cache
 # cleanup of the staging file can change what executes.
 _ATTACHMENT_MIMES = frozenset({'image/png', 'image/jpeg', 'image/gif', 'image/webp'})
-_ATTACHMENT_LIMIT = 10
+# Pictures one prompt may carry, on every admission path (``prompt.submit`` attachments, API image
+# parts, ACP content). Clients read it as ``attachment_limit`` (``session.create``,
+# ``session.resume``, ``runtime.describe``) instead of keeping a copy.
+ATTACHMENT_LIMIT = 10
 _IMAGE_EXT = {'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp'}
 
 
@@ -137,6 +140,16 @@ def sniff_image_mime(data):
     return None
 
 
+def check_attachment_count(count):
+    """Refuse more pictures than one prompt takes: ``too_many_attachments`` with the limit and the
+    count, which the refusal's ``error.data`` carries so a client can say why in words."""
+    if count > ATTACHMENT_LIMIT:
+        refusal = RuntimeStoreError('too_many_attachments', field='attachments',
+                                    detail=f'{count} pictures; one prompt takes up to {ATTACHMENT_LIMIT}')
+        refusal.limit, refusal.count = ATTACHMENT_LIMIT, count
+        raise refusal
+
+
 def admit_attachments(attachments, *, admitted=None):
     """Wire ``attachments: [{path, mime}]`` -> committed payload fields (``{}`` when absent).
 
@@ -144,10 +157,12 @@ def admit_attachments(attachments, *, admitted=None):
     ``None``): a lost-ACK retry whose disposable staging file is gone reconciles against it."""
     if attachments is None:
         return {}
-    if (not isinstance(attachments, list) or not attachments or len(attachments) > _ATTACHMENT_LIMIT
-            or any(not isinstance(item, dict) or set(item) != {'path', 'mime'}
-                   or not isinstance(item['path'], str) or item['mime'] not in _ATTACHMENT_MIMES
-                   for item in attachments)):
+    if not isinstance(attachments, list) or not attachments:
+        raise RuntimeStoreError('invalid_params')
+    check_attachment_count(len(attachments))
+    if any(not isinstance(item, dict) or set(item) != {'path', 'mime'}
+           or not isinstance(item['path'], str) or item['mime'] not in _ATTACHMENT_MIMES
+           for item in attachments):
         raise RuntimeStoreError('invalid_params')
     from gateway.platforms.base import get_image_cache_dir
     staging = get_image_cache_dir().resolve()

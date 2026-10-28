@@ -21,13 +21,14 @@ logger = logging.getLogger(__name__)
 # code, and this log line is what a report can quote when the client's copy is not enough.
 def _refusal_data(exc: RuntimeStoreError) -> dict:
     """The ``error.data`` for one ``RuntimeStoreError``: always the reason, plus the field and the
-    detail when the raiser named them."""
+    detail when the raiser named them, and the numbers it carries (``too_many_attachments``: the
+    ``limit`` and the ``count`` that broke it)."""
     data = {'reason': exc.reason}
     for key in ('field', 'detail'):
         value = getattr(exc, key, None)
         if value:
             data[key] = value
-    for key in ('revision', 'execution_generation'):
+    for key in ('revision', 'execution_generation', 'limit', 'count'):
         if isinstance(getattr(exc, key, None), int):
             data[key] = getattr(exc, key)
     if getattr(exc, 'admitted', None) is False:
@@ -540,6 +541,7 @@ class AuthorityConnection:
 
     async def describe(self, ref, params):
         await self.ping(ref, params)
+        from gateway.session_ingress_media import ATTACHMENT_LIMIT
         from gateway.session_policy import CREATE_FIELDS, SURFACES
         from gateway.session_skin import resolved_skin
         return {'instance_id': self.authority.instance_id, 'profile_id': self.authority.profile_id,
@@ -548,6 +550,7 @@ class AuthorityConnection:
                                  'acp-session-mcp-v1', 'clarify-batch-v1'],
                 'session_create': {'sources': sorted(SURFACES),
                                    'parameters': sorted(CREATE_FIELDS | {'title'})},
+                'attachment_limit': ATTACHMENT_LIMIT,
                 # Main's ``gateway.ready.skin``: the canonical client's own ready carries it.
                 'skin': await asyncio.to_thread(resolved_skin)}
 
@@ -682,6 +685,7 @@ class AuthorityConnection:
             await asyncio.to_thread(refresh_profile_hooks, policy_for_source(self.authority.runner, source))
             info = await snapshot_info(self.authority, snapshot.handle.ref)
         from gateway.session_connections import pending_connection
+        from gateway.session_ingress_media import ATTACHMENT_LIMIT
         from gateway.session_server_requests import open_requests
         history, display = list(snapshot.history), {}
         if params.get('display_projection'):
@@ -698,6 +702,7 @@ class AuthorityConnection:
                 'pending': [asdict(r) for r in snapshot.pending],
                 'prompts': list(snapshot.prompts), 'info': info,
                 'pending_connection': pending_connection(self.authority, ref.session_id),
+                'attachment_limit': ATTACHMENT_LIMIT,
                 # Still-waiting server→client requests: the event ring cannot say "still open".
                 'open_requests': open_requests(self.authority.sessions[snapshot.handle.ref.session_id].event_stream,
                                                snapshot.handle.ref.session_id)}

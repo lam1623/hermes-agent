@@ -28,7 +28,12 @@ lost-ACK retry protection must retain it. A failed transaction publishes no live
 
 Attach another authenticated viewer with `session.resume({session_id})`, and submit
 through `prompt.submit({session_id, submission_id, text})`. The accepted receipt is durable
-admission, not inference completion. Closing every viewer leaves the execution and its
+admission, not inference completion. Pictures ride in `attachments` (`[{path, mime}]`); one
+prompt takes up to `attachment_limit` of them, which the `session.create`, `session.resume` and
+`runtime.describe` answers carry so a client can say so before sending. A longer list is refused
+with `too_many_attachments`, whose `error.data` holds `limit` and `count` beside `reason`,
+`field` and `detail`; the API server refuses as many inline image parts with the same code (HTTP
+400). Closing every viewer leaves the execution and its
 pending approval alive. A new viewer can resume the same identity and answer through
 `approval.respond({session_id, execution_generation, prompt_id, choice})`.
 
@@ -126,8 +131,9 @@ listener keeps working.
   `session.info({session_id})` is a lightweight,
   authorized view of source, current model, lazy-agent status, and profile ID.
 - `ping({})` returns `{pong: true}`. `runtime.describe({})` exposes only authority identity,
-  epoch, capabilities, and the creation contract (`session_create.sources` and
-  `session_create.parameters`, which clients check before sending a launch option). It does not claim full runtime
+  epoch, capabilities, the creation contract (`session_create.sources` and
+  `session_create.parameters`, which clients check before sending a launch option) and the
+  per-prompt picture limit (`attachment_limit`). It does not claim full runtime
   protocol readiness, reveal credentials/paths, start an agent, or renew a turn lease.
 - Cold restart restores valid private local policies and server-owned routes before execution.
   Creation receipts remain bound to their authenticated creating principal and profile;

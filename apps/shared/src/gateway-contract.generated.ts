@@ -4809,6 +4809,7 @@ export interface RuntimeDescribeResult {
   authority_epoch: number
   capabilities: string[]
   session_create: SessionCreateDescriptor
+  attachment_limit?: number | null
   skin?: SkinPayload | null
 }
 export interface SessionCreateDescriptor {
@@ -5001,6 +5002,7 @@ export interface CanonicalSnapshot {
   pending_connection?: ConnectionRequestPayload | null
   todo_state?: TodoState | null
   open_requests?: OpenRequestEntry[] | null
+  attachment_limit?: number | null
 }
 export interface CanonicalPendingAdmission {
   admission_id: string

@@ -5,8 +5,6 @@ import os
 from pathlib import Path
 
 _MIME_EXT = {'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp'}
-# Same per-admission count as ``prompt.submit`` attachments (``session_ingress_media._ATTACHMENT_LIMIT``).
-_IMAGE_LIMIT = 10
 
 
 def _data_url_bytes(url):
@@ -32,17 +30,17 @@ def commit_api_images(content):
     exact retry keeps its admission digest) and commit the bytes as immutable media."""
     from gateway.platforms.base import get_image_cache_dir
     from gateway.platforms.base import get_inbound_media_max_bytes
-    from gateway.session_ingress_media import capture_native_media, sniff_image_mime
+    from gateway.session_ingress_media import capture_native_media, check_attachment_count, sniff_image_mime
     from hermes_state_runtime import RuntimeStoreError
     # The bytes decide the committed type: SDKs often label JPEG bytes ``data:image/png`` and
     # main forwarded those to the provider; only bytes that are no supported image are refused.
     images = [(sniff_image_mime(decoded[1]), decoded[1])
               for decoded in map(_data_url_bytes, _image_urls(content)) if decoded is not None]
     # Validate the whole batch before one byte lands on disk: a refused request must not
-    # leave staged or committed bytes behind.
+    # leave staged or committed bytes behind. The count is ``prompt.submit``'s own.
+    check_attachment_count(len(images))
     limit = max(0, get_inbound_media_max_bytes())
-    if (len(images) > _IMAGE_LIMIT or (limit and sum(len(data) for _, data in images) > limit)
-            or any(mime is None for mime, _ in images)):
+    if (limit and sum(len(data) for _, data in images) > limit) or any(mime is None for mime, _ in images):
         raise RuntimeStoreError('invalid_params')
     staged = []
     for mime, data in images:

@@ -10471,6 +10471,18 @@
             ],
             "default": null,
             "title": "Open Requests"
+          },
+          "attachment_limit": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Attachment Limit"
           }
         },
         "required": [
@@ -34632,6 +34644,18 @@
           },
           "session_create": {
             "$ref": "#/components/schemas/SessionCreateDescriptor"
+          },
+          "attachment_limit": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Attachment Limit"
           },
           "skin": {
             "anyOf": [

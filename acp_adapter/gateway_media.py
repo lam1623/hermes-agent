@@ -62,14 +62,14 @@ async def stage_user_content(content, home=None):
     import base64
     import binascii
     from gateway.platforms.base import cache_image_from_bytes
-    from gateway.session_ingress_media import _ATTACHMENT_LIMIT, _IMAGE_EXT, sniff_image_mime
+    from gateway.session_ingress_media import ATTACHMENT_LIMIT, _IMAGE_EXT, sniff_image_mime
     texts, attachments = [], []
     for part in content:
         if part.get('type') == 'text':
             texts.append(part['text'])
             continue
         url = part['image_url']['url']
-        if len(attachments) >= _ATTACHMENT_LIMIT:
+        if len(attachments) >= ATTACHMENT_LIMIT:
             raise GatewayClientError('acp_content_invalid')
         if url.startswith('data:'):
             try:

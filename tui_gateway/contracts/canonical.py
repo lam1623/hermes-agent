@@ -344,6 +344,8 @@ class RuntimeDescribeResult(Result):
     authority_epoch: int
     capabilities: list[str]
     session_create: SessionCreateDescriptor
+    #: Pictures one prompt may carry (``CanonicalSnapshot.attachment_limit``); absent from older gateways.
+    attachment_limit: int | None = None
     #: The owning profile's resolved skin (``resolve_skin()``, main's ``gateway.ready.skin``).
     skin: SkinPayload | None = None
 
