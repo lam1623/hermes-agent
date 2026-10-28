@@ -243,12 +243,104 @@ def _interrupt_busy_session(sid: str, session: dict, agent: Any) -> None:
     threading.Thread(target=interrupt, daemon=True, name=f"busy-interrupt-{sid}").start()
 
 
+def _steer_live_turn(session: dict, agent: Any, text: str) -> bool:
+    """``agent.steer(text)`` under ``history_lock``, noting where the queue stood when it was accepted
+    (``_note_steer_queue_place``), so a prompt queued at the same moment cannot pass it. Every steer this
+    gateway accepts (busy submit, ``session.steer``, ``/steer``) comes through here. ``AIAgent.steer`` only
+    appends to a buffer."""
+    with session["history_lock"]:
+        if not agent.steer(text):
+            return False
+        _note_steer_queue_place(session, text)
+        return True
+
+
+def _queue_entries(session: dict) -> list:
+    return ([session["queued_prompt"]] if session.get("queued_prompt") else []) + list(session.get("queued_prompts") or [])
+
+
+def _mergeable_text(envelope: dict) -> bool:
+    """A queue envelope a text-only arrival may merge into (``_enqueue_prompt``)."""
+    return isinstance(envelope.get("text"), str) and not envelope.get("image_paths") and not envelope.get("turn_author")
+
+
+def _note_steer_queue_place(session: dict, text: str) -> None:
+    """Remember where the queue stood when this turn accepted a steer: its last envelope and that envelope's
+    text length (None: empty queue). A steer the turn leaves unread goes back to that place
+    (``_requeue_leftover_steer``), ahead of what the user queued after it. Caller holds ``history_lock``;
+    the turn's admission clears the list."""
+    entries = _queue_entries(session)
+    tail = entries[-1] if entries else None
+    size = len(tail["text"]) if tail is not None and isinstance(tail.get("text"), str) else None
+    session.setdefault("_turn_steers", []).append((text.strip(), tail, size))
+
+
+def _leftover_steer_places(session: dict, text: str) -> list | None:
+    """``[text, tail, size]`` per run of the leftover's steers that share one queue place, oldest first.
+    The leftover is the newline join of the turn's last accepted steers (the agent read the ones before
+    it), so it is matched to the shortest such run. None when no run matches or a place left the queue
+    (a steer accepted elsewhere, a scrubbed envelope): the caller queues the whole text at the end."""
+    steers = session.pop("_turn_steers", None) or []
+    start = next((n for n in range(len(steers) - 1, -1, -1)
+                  if "\n".join(part for part, _, _ in steers[n:]) == text), None)
+    if start is None:
+        return None
+    places: list = []
+    for part, tail, size in steers[start:]:
+        if places and places[-1][1] is tail and places[-1][2] == size:
+            places[-1][0] += "\n" + part
+        else:
+            places.append([part, tail, size])
+    queued = _queue_entries(session)
+    if any(tail is not None and not any(e is tail for e in queued) for _, tail, _ in places):
+        return None
+    return places
+
+
+def _requeue_leftover_steer(session: dict, text: str, transport: Any) -> None:
+    """Queue the steers a turn accepted and never read (``pending_steer``) where the user sent them: each
+    goes where ``_enqueue_prompt`` would have put it when it was accepted, so a prompt queued before it
+    stays ahead and one queued after it runs after it. Appending them, as before, ran "B" ahead of the
+    steer "late" the user sent first. A steer this gateway did not place (a redirect the agent turned into
+    a steer) falls back to that append. Caller holds ``history_lock``."""
+    _drop_queued_duplicates_of_inflight_user(session)  # first: it may rewrite an envelope a place names
+    places = _leftover_steer_places(session, text)
+    if places is None:
+        _enqueue_prompt(session, text, transport)
+        return
+    original = _ac_inflight_original(session)
+    # Newest place first: a later place in the same envelope sits at a larger offset, so an earlier
+    # splice never moves it.
+    for part, tail, size in reversed(places):
+        if part == original:
+            continue
+        entries = _queue_entries(session)
+        at = 0 if tail is None else next(n for n, e in enumerate(entries) if e is tail)
+        head = entries[at] if entries else None
+        if head is not None and at == 0 and _mergeable_text(head):
+            # The steer would have merged into this text-only head (or become it, before later text
+            # merged into it): splice it in at its place.
+            cut = 0 if tail is None else size
+            before, after = head["text"][:cut], head["text"][cut:]
+            head["text"] = "\n\n".join(p for p in (before, part, after.removeprefix("\n\n")) if p)
+            if isinstance(head.get("_submit_user_row"), dict):
+                _persist_queued_user_row(session, head, None)  # the accept-time row follows the text
+        else:
+            entries.insert(at if tail is None else at + 1, {"text": part, "transport": transport})
+            _ac_set_queue(session, entries)
+
+
 def _ac_try_correction(rid, session: dict, agent: Any, method: str, plain_text: str, status: str) -> dict | None:
     """Apply ``agent.<method>(plain_text)`` (steer/redirect); on acceptance record the correction, scrub stale
     self-duplicates so the live turn's original text is not re-fired after settle, and return the ``status`` reply.
-    None → caller falls through to the queue path."""
+    None → caller falls through to the queue path. ``redirect`` stays outside ``history_lock``: Codex app-server's
+    is a native ``turn/steer`` request."""
     try:
-        if not getattr(agent, method)(plain_text):
+        if method == "steer":
+            accepted = _steer_live_turn(session, agent, plain_text)
+        else:
+            accepted = getattr(agent, method)(plain_text)
+        if not accepted:
             return None
     except Exception:
         return None

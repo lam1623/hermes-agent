@@ -148,6 +148,7 @@ def _admit_prompt_turn(
         images = list(session.get("attached_images", []) if image_paths is None else image_paths)
         if image_paths is None:
             session["attached_images"] = []
+        session.pop("_turn_steers", None)  # the queue places of this turn's steers (_requeue_leftover_steer)
         inflight = session.get("inflight_turn")
         # A retained failed turn (see _fail_inflight_turn) is a stale leftover
         # by the time a new turn starts — replace it, never append onto it.
@@ -440,12 +441,13 @@ def _run_post_turn_followups(
     rid, sid: str, session: dict, result: Any, goal_followup: str | None) -> None:
     """Chain whatever should run after ``running`` was released.  Order: a mid-turn user
     prompt wins over every auto follow-up (drain it, skip the rest); a leftover /steer is
-    requeued first so it isn't dropped; then goal continuation, then completion
-    notifications.  Each nested submit re-checks ``running`` under the lock."""
+    requeued first so it isn't dropped, at the queue place it was accepted at (ahead of what was
+    queued after it); then goal continuation, then completion notifications.  Each nested submit
+    re-checks ``running`` under the lock."""
     steer = result.get("pending_steer") if isinstance(result, dict) else None
     if isinstance(steer, str) and steer.strip():
         with session["history_lock"]:
-            _enqueue_prompt(session, steer, session.get("transport"))
+            _requeue_leftover_steer(session, steer, session.get("transport"))
     if _drain_queued_prompt(rid, sid, session):
         return
     if goal_followup:
