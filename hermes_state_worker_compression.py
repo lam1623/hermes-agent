@@ -334,8 +334,14 @@ def worker_publish(db, conn, sid, payload):
     for key in ('_branched_from', '_delegate_from', '_reset_from'):
         if key in cfg and cfg[key] != prior.get(key):
             raise RuntimeStoreError('permission_denied')
-        if key in prior:
-            cfg[key] = prior[key]
+    # /branch and reset markers name the edge that made the parent its own conversation; a segment is
+    # the same conversation, so it carries neither (the owner's _publish_child_session_row never did,
+    # and readers count them by presence: pin/archive carry, reset listing). A delegate's segments
+    # stay its execution transcript, so _delegate_from follows.
+    for key in ('_branched_from', '_reset_from'):
+        cfg.pop(key, None)
+    if '_delegate_from' in prior:
+        cfg['_delegate_from'] = prior['_delegate_from']
     if conn.execute('SELECT 1 FROM sessions WHERE id=?', (child,)).fetchone():
         raise RuntimeStoreError('permission_denied')
     worker = conn.execute("SELECT * FROM worker_executions WHERE session_id=? AND status IN ('registered','running')", (sid,)).fetchone()
