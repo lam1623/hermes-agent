@@ -36,6 +36,10 @@ file except tests (``tests/``, ``tests-js/``, ``__tests__/``, ``e2e/``, ``test_*
 build files (``Dockerfile*``, ``docker/``), generated lockfiles and the translated docs mirror
 (``website/i18n/``, regenerated from the English source).
 
+Paths given on the command line narrow the scan, never widen it: a directory is walked with the
+same rules, and a path the whole-tree scan does not read is named with the reason, never passed
+over in silence. A path that does not exist is an error (exit 2).
+
 Run: python scripts/check_no_tmp_literals.py [--all] [--print-baseline] [paths...]
   --all              ignore ``_BASELINE`` and report every hit (burn-down view)
   --print-baseline   print a ``_BASELINE`` literal matching the current tree
@@ -178,15 +182,17 @@ def _git_ignored(root: Path) -> set[Path]:
     return {root / rel for rel in out.split("\0") if rel}
 
 
-def iter_files(root: Path | None = None):
+def iter_files(root: Path | None = None, start: Path | None = None):
+    """The files the scan reads under *start* (default: the whole *root*)."""
     root = (root or ROOT).resolve()
     ignored = _git_ignored(root)
-    for dirpath, dirnames, filenames in os.walk(root):
+    for dirpath, dirnames, filenames in os.walk(start or root):
         here = Path(dirpath)
-        rel_here = here.relative_to(root) if here != root else Path()
+        rel_here = here.relative_to(root) if here.is_relative_to(root) else None
         excluded = SKIP_DIRS | (ROOT_SKIP_DIRS if here == root else set())
         dirnames[:] = sorted(
-            d for d in dirnames if d not in excluded and (rel_here / d) not in SKIP_REL_DIRS
+            d for d in dirnames
+            if d not in excluded and (rel_here is None or (rel_here / d) not in SKIP_REL_DIRS)
         )
         for filename in sorted(filenames):
             path = here / filename
@@ -194,14 +200,52 @@ def iter_files(root: Path | None = None):
                 yield path
 
 
+def _outside_scope(path: Path, root: Path) -> str | None:
+    """Why the whole-tree scan never reads *path* (a file or a directory), or None when it does."""
+    if path.is_relative_to(root):
+        rel = path.relative_to(root)
+        dirs = rel.parts if path.is_dir() else rel.parts[:-1]
+        for i, part in enumerate(dirs):
+            if part in SKIP_DIRS or (i == 0 and part in ROOT_SKIP_DIRS):
+                return f"under {Path(*dirs[:i + 1]).as_posix()}/, which this check skips"
+        for skipped in sorted(SKIP_REL_DIRS):
+            if rel == skipped or skipped in rel.parents:
+                return f"in {skipped.as_posix()}/, a generated tree"
+    if path.is_file() and _skip_file(path):
+        return "a file this check does not read (its type, a test, a lockfile or the checker itself)"
+    return None
+
+
+def files_for(paths, root: Path | None = None) -> tuple[list[Path], list[str]]:
+    """The files to read for command-line *paths*, and a note for each path that leaves none to read.
+
+    Raises FileNotFoundError for a path that does not exist."""
+    root = (root or ROOT).resolve()
+    ignored = _git_ignored(root)
+    files: list[Path] = []
+    notes: list[str] = []
+    for raw in paths:
+        path = Path(raw).resolve()
+        if not path.exists():
+            raise FileNotFoundError(raw)
+        reason = _outside_scope(path, root) or ("ignored by git" if path in ignored else None)
+        found = [] if reason else list(iter_files(root, start=path)) if path.is_dir() else [path]
+        if not found:
+            notes.append(f"{raw}: not scanned, {reason or 'it holds no file this check reads'}")
+        files.extend(found)
+    return files, notes
+
+
 def scan(paths=None, root: Path | None = None) -> dict[str, list[tuple[int, str]]]:
-    """Repo-relative POSIX path -> [(lineno, line)] for every file with at least one hit."""
+    """Repo-relative POSIX path -> [(lineno, line)] for every file with at least one hit.
+
+    *paths* are files to read (``files_for`` turns command-line paths into them); None reads the tree."""
     root = (root or ROOT).resolve()
     hits: dict[str, list[tuple[int, str]]] = {}
-    files = list(paths) if paths else list(iter_files(root))
+    files = list(iter_files(root)) if paths is None else list(paths)
     for path in files:
         path = Path(path).resolve()
-        if paths and _skip_file(path):
+        if paths is not None and _skip_file(path):
             continue
         try:
             text = path.read_text(encoding="utf-8-sig", errors="ignore")
@@ -232,13 +276,22 @@ def _format_baseline(hits: dict[str, list]) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
-    ap.add_argument("paths", nargs="*", help="files to check (default: whole repo)")
+    ap.add_argument("paths", nargs="*", help="files or directories to check (default: whole repo)")
     ap.add_argument("--all", action="store_true", help="ignore _BASELINE; report every hit")
     ap.add_argument("--print-baseline", action="store_true", help="print a _BASELINE for the current tree")
     ap.add_argument("--strict-baseline", action="store_true", help="also fail when _BASELINE overstates a file")
     args = ap.parse_args(argv)
 
-    hits = scan(args.paths or None)
+    if args.paths:
+        try:
+            files, notes = files_for(args.paths)
+        except FileNotFoundError as exc:
+            ap.error(f"no such file or directory: {exc}")  # exit 2
+        for note in notes:
+            print(note)
+        hits = scan(files)
+    else:
+        hits = scan()
     if args.print_baseline:
         print(_format_baseline(hits))
         return 0

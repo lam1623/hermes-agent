@@ -137,3 +137,31 @@ def test_baseline_entries_are_burned_down_not_grown(tmp_path, monkeypatch, capsy
 
     monkeypatch.setattr(mod, "_BASELINE", {"tools/a.py": 2})
     assert mod.main(["--all"]) == 1  # burn-down view ignores the baseline
+
+def _tree(root, files):
+    for rel, text in files.items():
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+
+def test_a_directory_argument_is_scanned_with_the_tree_rules(tmp_path, monkeypatch, capsys):
+    mod = _load()
+    _tree(tmp_path, {"tools/a.py": 'X = "/tmp/a"\n', "tools/tests/b.py": 'X = "/tmp/b"\n'})
+    monkeypatch.setattr(mod, "ROOT", tmp_path)
+    assert mod.main([str(tmp_path / "tools")]) == 1
+    out = capsys.readouterr().out
+    assert "tools/a.py:1" in out
+    assert "tools/tests" not in out
+
+def test_a_path_outside_the_scope_is_named_and_a_missing_one_is_an_error(tmp_path, monkeypatch, capsys):
+    mod = _load()
+    _tree(tmp_path, {"website/i18n/x/page.md": "/tmp/a\n", "tools/clean.py": "X = 1\n", "tools/a.png": ""})
+    monkeypatch.setattr(mod, "ROOT", tmp_path)
+    mirror, png = tmp_path / "website" / "i18n", tmp_path / "tools" / "a.png"
+    assert mod.main([str(mirror), str(png), str(tmp_path / "tools" / "clean.py")]) == 0
+    out = capsys.readouterr().out
+    assert f"{mirror}: not scanned, in website/i18n/, a generated tree" in out
+    assert f"{png}: not scanned, a file this check does not read" in out
+    with pytest.raises(SystemExit) as exc:
+        mod.main([str(tmp_path / "missing")])
+    assert exc.value.code == 2
