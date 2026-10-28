@@ -243,12 +243,28 @@ def _interrupt_busy_session(sid: str, session: dict, agent: Any) -> None:
     threading.Thread(target=interrupt, daemon=True, name=f"busy-interrupt-{sid}").start()
 
 
+def _steer_live_turn(session: dict, agent: Any, text: str) -> bool:
+    """``agent.steer(text)`` while the session's turn still has a live agent. It runs under ``history_lock``, where
+    the turn closes itself to corrections once its agent is done (prompt_turn ``_close_turn_to_corrections``), so a
+    steer either lands before that close, which hands it on, or is refused (False) and the caller sends the text as
+    the next prompt: never into a turn that already ended. ``AIAgent.steer`` only appends to a buffer."""
+    with session["history_lock"]:
+        if not session.get("running") or session.get("_turn_agent_done"):
+            return False
+        return bool(agent.steer(text))
+
+
 def _ac_try_correction(rid, session: dict, agent: Any, method: str, plain_text: str, status: str) -> dict | None:
     """Apply ``agent.<method>(plain_text)`` (steer/redirect); on acceptance record the correction, scrub stale
     self-duplicates so the live turn's original text is not re-fired after settle, and return the ``status`` reply.
-    None → caller falls through to the queue path."""
+    None → caller falls through to the queue path. ``redirect`` stays outside ``history_lock``: Codex app-server's
+    is a native ``turn/steer`` request."""
     try:
-        if not getattr(agent, method)(plain_text):
+        if method == "steer":
+            accepted = _steer_live_turn(session, agent, plain_text)
+        else:
+            accepted = getattr(agent, method)(plain_text)
+        if not accepted:
             return None
     except Exception:
         return None
@@ -415,13 +431,16 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any,
             return None  # turn ended since prompt.submit's busy check; caller retries on the idle session
         # Typed while the turn ran, in any busy mode: the running turn no longer counts as unattended.
         session["_turn_user_input"] = True
+        # The agent already ended this turn, which only publishes it before the release: a correction
+        # would land where nothing reads it and an interrupt has nothing left to stop. It queues instead.
+        turn_closed = bool(session.get("_turn_agent_done"))
         image_paths = list(session.get("attached_images", []))
         if image_paths:
             session["attached_images"] = []  # claim now so a later paste isn't consumed when the turn yields
     plain_text = _coerce_message_text(text).strip() if not image_paths and _is_text_only_busy_payload(text) else ""
     # Text-only corrections steer/redirect in place when supported; media payloads and older agents fall through to
     # the proven interrupt + queue path.
-    if plain_text and agent is not None:
+    if plain_text and agent is not None and not turn_closed:
         supported = {
             "steer": hasattr(agent, "steer"),
             "interrupt": getattr(agent, "_supports_active_turn_redirect", False) is True and hasattr(agent, "redirect")}
@@ -436,6 +455,7 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any,
             if image_paths:
                 session["attached_images"] = image_paths + list(session.get("attached_images", []))
             return None
+        turn_closed = turn_closed or bool(session.get("_turn_agent_done"))
         envelope = _enqueue_prompt(session, text, transport, image_paths=image_paths, turn_author=turn_author)
         # Durable AT ACCEPT (not when the turn runs): a cold resume sees the queued message and a
         # backend restart cannot lose it. Lives on the envelope, never the shared session slot.
@@ -449,7 +469,7 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any,
     # ``AIAgent._pending_steer``) and fall-through queue envelopes (payload not steerable, ``steer()``
     # rejected/raised). A hard interrupt here kills the live turn AND ``AIAgent.interrupt()`` drops the
     # pending steer buffer — silently destroying the earlier messages of the burst. See #86134.
-    if mode == "interrupt" and not image_paths:
+    if mode == "interrupt" and not image_paths and not turn_closed:
         _interrupt_busy_session(sid, session, agent)
     return _ok(rid, {"status": "queued"})
 

@@ -115,7 +115,9 @@ def _apply_correction(rid, session: dict, verb: str, text: str, accepted_status:
     """``agent.<verb>(text)``; on acceptance record it on the live turn (mid-turn resume rebuilds the bubble)
     and purge queued self-copies so post-turn drain cannot re-fire the old prompt."""
     try:
-        accepted = getattr(session["agent"], verb)(text)
+        agent = session["agent"]
+        # A steer once the agent ended the turn would be parked where nothing reads it: "rejected".
+        accepted = _steer_live_turn(session, agent, text) if verb == "steer" else getattr(agent, verb)(text)
     except Exception as exc:
         return _err(rid, 5000, f"{verb} failed: {exc}")
     if accepted:

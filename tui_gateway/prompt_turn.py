@@ -148,6 +148,7 @@ def _admit_prompt_turn(
         images = list(session.get("attached_images", []) if image_paths is None else image_paths)
         if image_paths is None:
             session["attached_images"] = []
+        session.pop("_turn_agent_done", None)  # a new turn takes corrections again (_close_turn_to_corrections)
         inflight = session.get("inflight_turn")
         # A retained failed turn (see _fail_inflight_turn) is a stale leftover
         # by the time a new turn starts — replace it, never append onto it.
@@ -480,6 +481,30 @@ def _run_post_turn_followups(
                 process_registry.completion_queue.put(event)
     except Exception as _drain_exc:
         _hook_failure("completion queue drain", _drain_exc)
+
+
+def _close_turn_to_corrections(session: dict, st: _TurnRun) -> None:
+    """The agent is done with this turn; the turn still publishes it (``message.complete``) before it
+    releases ``running``. From here a busy submit queues for the next turn instead of steering into this
+    one or interrupting it (``_handle_busy_submit``, ``_steer_live_turn``): nothing would read the steer.
+    A steer the agent took after its finalizer drained the leftovers is drained here and handed on like
+    them, as ``pending_steer``; a turn that raised has no result to carry it, so it is queued directly.
+    Both run as the next turn (``_run_post_turn_followups``)."""
+    with session["history_lock"]:
+        if session.get("_turn_agent_done"):
+            return
+        session["_turn_agent_done"] = True
+        late = None
+        with contextlib.suppress(Exception):
+            late = st.agent._drain_leftover_steer()
+        if not (isinstance(late, str) and late.strip()):
+            return
+        if not isinstance(st.result, dict):
+            _enqueue_prompt(session, late, session.get("transport"))
+            return
+    earlier = st.result.get("pending_steer")
+    st.result["pending_steer"] = "\n".join(
+        part for part in (earlier, late) if isinstance(part, str) and part.strip())
 
 
 @dataclasses.dataclass(slots=True)
@@ -1159,9 +1184,12 @@ def _run_prompt_submit(
                     st.receipt_committed = True
                 return
             prompt, run_message, cols, streamer = prepared
-            _invoke_agent(
-                sid, session, st, prompt, run_message, streamer, images, display_kind,
-                display_metadata, turn_author, text)
+            try:
+                _invoke_agent(
+                    sid, session, st, prompt, run_message, streamer, images, display_kind,
+                    display_metadata, turn_author, text)
+            finally:
+                _close_turn_to_corrections(session, st)  # before message.complete or the error frame
             status_note = _absorb_turn_result(
                 sid, session, st, text, display_kind, display_metadata)
             payload, raw, status = _complete_turn_payload(session, st, status_note, cols)
@@ -1187,6 +1215,7 @@ def _run_prompt_submit(
                 st.agent.interim_assistant_callback = None
                 with session["history_lock"]:
                     session["running"] = False
+                    session.pop("_turn_agent_done", None)
                     session["last_active"] = time.time()
                     session.pop("_turn_user_input", None)  # per turn: never leaks into the next one
                     if not st.error_retained:
