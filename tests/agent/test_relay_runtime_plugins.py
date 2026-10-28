@@ -453,6 +453,70 @@ def test_initialization_failure_is_fail_open(explicit_static_config, caplog):
         host.shutdown()
 
 
+class _PluginHostlessRelay(_FakeRelay):
+    """nemo-relay 0.8's binding: ``plugin.initialize`` and ``plugin.validate`` take the config alone."""
+
+    def __init__(self) -> None:
+        super().__init__()
+
+        async def initialize(config: dict[str, Any]) -> Any:
+            self.events.append(("plugin.initialize", config))
+
+        def validate(config: dict[str, Any]) -> dict[str, Any]:
+            return {}
+
+        self.plugin = SimpleNamespace(initialize=initialize, validate=validate)
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_a_binding_without_the_plugin_host_runs_without_plugins_and_says_so_in_one_line(
+    explicit, explicit_static_config, monkeypatch, caplog
+):
+    """An older wheel outlives the dependency where Hermes no longer installs Relay: Hermes' call raised a
+    TypeError there, logged with its traceback in every process. The host runs as with no plugin files and
+    says so once, as a warning only when a file the user selected does not load."""
+    if not explicit:
+        monkeypatch.delenv(relay_runtime.RELAY_PLUGINS_CONFIG_ENV)
+    relay = _PluginHostlessRelay()
+
+    with caplog.at_level("INFO", logger=relay_runtime.__name__):
+        host = relay_runtime.RelayRuntime(relay=relay, profile_key="profile")
+    try:
+        assert host._plugin_configuration_state is relay_runtime._RelayPluginConfigurationState.DISABLED
+        assert not host.managed_execution_enabled()
+        host.ensure_session({"session_id": "session"})
+        assert [event[0] for event in relay.events] == ["scope.push"], "no plugin call; scopes as before"
+    finally:
+        host.shutdown()
+
+    said = [(r.levelname, r.exc_info) for r in caplog.records if "Relay plugins are off" in r.getMessage()]
+    assert said == [("WARNING" if explicit else "INFO", None)], caplog.text
+    assert "initialization failed" not in caplog.text
+
+
+def test_a_binding_without_a_readable_signature_is_called_as_before(monkeypatch):
+    """A binding whose callables publish no signature is not taken for one without the plugin host."""
+    monkeypatch.delenv(relay_runtime.RELAY_PLUGINS_CONFIG_ENV, raising=False)
+
+    def unreadable(_call):
+        raise ValueError("no signature found")
+
+    monkeypatch.setattr(relay_runtime.inspect, "signature", unreadable)
+    relay = _FakeRelay()
+    host = relay_runtime.RelayRuntime(relay=relay, profile_key="profile")
+    try:
+        assert host._plugin_configuration_state is relay_runtime._RelayPluginConfigurationState.ACTIVE
+        assert relay.initialized_from == [None]
+    finally:
+        host.shutdown()
+
+
+def test_the_plugin_sources_of_a_binding_without_the_plugin_host_say_why(explicit_static_config):
+    """``hermes doctor`` reads them through ``plugin.validate``, which raised the same TypeError."""
+    with pytest.raises(RuntimeError, match="has no plugin host"):
+        relay_runtime.resolve_plugin_sources(_PluginHostlessRelay())
+
+
 def test_later_host_shares_initialization_failure(explicit_static_config):
     relay = _FakeRelay(initialize_error=RuntimeError("transient failure"))
     failed_host = relay_runtime.RelayRuntime(relay=relay, profile_key="failed")

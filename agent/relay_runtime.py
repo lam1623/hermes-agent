@@ -8,6 +8,7 @@ import contextlib
 import contextvars
 import functools
 import importlib
+import importlib.metadata
 import inspect
 import logging
 import os
@@ -342,6 +343,13 @@ class _ProcessRelayPluginConfiguration:
     def _initialize(self, relay: Any) -> bool:
         """Initialize Relay and report whether the resolved configuration needs managed execution."""
         config_path = _configured_plugin_inputs()
+        if gap := _plugin_host_gap(relay.plugin.initialize):
+            # Run as with no plugin files. A file the user selected is named, since it does not load.
+            if config_path is None:
+                logger.info("Relay plugins are off in this process: %s", gap)
+            else:
+                logger.warning("Relay plugins are off in this process, so %s is not loaded: %s", config_path, gap)
+            return False
         # An explicit file replaces Relay's user file; its system file always remains above either source.
         activation = _resolve_plugin_awaitable(relay.plugin.initialize({}, additional_plugins_toml=config_path))
         if activation is None:
@@ -1378,13 +1386,37 @@ class RelayPluginSources:
     warnings: tuple[str, ...]
 
 
+def _plugin_host_gap(call: Callable[..., Any]) -> str | None:
+    """Why ``call``, the binding's ``plugin.initialize`` or ``plugin.validate``, cannot take Hermes' arguments.
+
+    Both take ``additional_plugins_toml`` since nemo-relay 0.9, its plugin host. An older wheel outlives the
+    dependency where Hermes stopped installing Relay (Python below 3.14: nothing removes it there), and the call
+    raised a TypeError in every process. None when the arguments fit, or when the binding publishes no
+    signature to check (the call is then made as before).
+    """
+    try:
+        signature = inspect.signature(call)
+    except (TypeError, ValueError):
+        return None
+    with contextlib.suppress(TypeError):
+        signature.bind({}, additional_plugins_toml=None)
+        return None
+    try:
+        installed = f"nemo-relay {importlib.metadata.version('nemo-relay')}"
+    except importlib.metadata.PackageNotFoundError:  # a test double where Relay is not installed
+        installed = "this nemo-relay"
+    return f"{installed} has no plugin host (it came in 0.9)"
+
+
 def resolve_plugin_sources(relay: Any = None) -> RelayPluginSources:
     """Resolve the plugins.toml layers this process would load, without loading plugin code.
 
     Relay's validator reads the same layers as initialization but does not take the process-wide host.
-    Raises when a file cannot be read or parsed.
+    Raises when a file cannot be read or parsed, or when the binding has no plugin host.
     """
     relay = relay or _load_nemo_relay()
+    if gap := _plugin_host_gap(relay.plugin.validate):
+        raise RuntimeError(gap)
     report = relay.plugin.validate({}, additional_plugins_toml=_explicit_plugins_toml())
     diagnostics = [d for d in (report.get("config") or {}).get("diagnostics") or [] if isinstance(d, dict)]
     return RelayPluginSources(
