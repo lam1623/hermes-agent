@@ -501,11 +501,15 @@ async def select_toolset_provider(
 
     ``web`` only: ``capability`` ('search' | 'extract') writes
     ``web.<capability>_backend`` (the override the dispatchers resolve first);
-    omitted -> legacy ``web.backend``.  Managed Nous rows report Portal
-    entitlement (``needs_nous_auth`` + ``feature``): the GUI has no inline
-    login, so an unentitled selection would write config and never activate.
+    omitted -> legacy ``web.backend``.  Managed Nous rows ask the Portal
+    first: a signed-in plan that does not include the row is refused (403)
+    with nothing written, since signing in cannot change a plan and the write
+    would replace a working provider.  Signed out (or
+    unverified), the pick is written and reported as ``needs_nous_auth`` +
+    ``feature``: the GUI has no inline login and finishes it with a sign-in.
     """
     from hermes_cli.tools_config import apply_provider_selection, web_provider_capabilities
+    from hermes_cli.nous_account import format_nous_portal_entitlement_message
     from hermes_cli.nous_subscription import (
         MANAGED_FEATURE_COVERAGE_CATEGORY, get_nous_subscription_features)
 
@@ -520,9 +524,32 @@ async def select_toolset_provider(
         return next(
             (p for p in _category_providers(name, config) if p.get("name") == body.provider), None)
 
+    def _entitlement(config):
+        """``(managed_feature, entitled, refusal)`` for the picked row. The Portal call runs before the
+        write and outside the mutation lock (the CLI's ``_nous_provider_gate`` order); ``refusal`` is
+        set only when the Portal answered for a signed-in account whose plan lacks the row."""
+        row = _provider_row(config)
+        managed_feature = (row or {}).get("managed_nous_feature")
+        if not managed_feature:
+            return None, True, None
+        acct = get_nous_subscription_features(config, force_fresh=True).account_info
+        category = MANAGED_FEATURE_COVERAGE_CATEGORY.get(managed_feature)
+        entitled = bool(acct and acct.logged_in and (
+            acct.tool_gateway_entitled_for(category) if category else acct.tool_gateway_entitled))
+        refusal = None
+        if (not entitled and acct is not None and acct.logged_in and acct.paid_service_access is not None
+                and not acct.is_anonymous_tier):
+            refusal = format_nous_portal_entitlement_message(
+                acct, capability=row["name"], coverage_category=category) or (
+                f"{row['name']} isn't included with your current Nous Portal access.")
+        return managed_feature, entitled, refusal
+
     def _run():
         with _profile_scope(body.profile or profile):
             _require_known_toolset(name)
+            managed_feature, entitled, refusal = _entitlement(load_config())
+            if refusal:
+                raise HTTPException(status_code=403, detail=refusal)
             with _CONFIG_MUTATION_LOCK:
                 config = load_config()
                 if body.capability is not None:
@@ -554,25 +581,9 @@ async def select_toolset_provider(
                 if body.capability is not None:
                     response["capability"] = body.capability
 
-            # Entitlement check for managed Nous rows (mirrors the CLI's
-            # ensure_nous_portal_access gate).  Hits the Portal, so it runs AFTER
-            # releasing the mutation lock — still in the worker thread + scope.
-            row = _provider_row(config)
-            managed_feature = (row or {}).get("managed_nous_feature")
-            if managed_feature:
-                features = get_nous_subscription_features(config, force_fresh=True)
-                acct = features.account_info
-                category = MANAGED_FEATURE_COVERAGE_CATEGORY.get(managed_feature)
-                entitled = bool(
-                    acct
-                    and acct.logged_in
-                    and (
-                        acct.tool_gateway_entitled_for(category)
-                        if category
-                        else acct.tool_gateway_entitled))
-                if not entitled:
-                    response["needs_nous_auth"] = True
-                    response["feature"] = managed_feature
+            if managed_feature and not entitled:
+                response["needs_nous_auth"] = True
+                response["feature"] = managed_feature
         return response
 
     return await asyncio.to_thread(_run)
