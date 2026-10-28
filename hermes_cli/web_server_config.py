@@ -146,8 +146,9 @@ _SCHEMA_OVERRIDES: dict[str, dict[str, Any]] = {
     "human_delay.mode": _select("Simulated typing delay mode", "off", "typing", "fixed"),
     "logging.level": _select("Log level for agent.log", "DEBUG", "INFO", "WARNING", "ERROR"),
     "agent.service_tier": _select(
-        "Fast mode: fast = always, auto = first N seconds of each turn, cold = first turn only",
-        "", "normal", "fast", "auto", "cold",
+        "Fast mode: fast = always, ultrafast = OpenAI Ultrafast where the model offers it, "
+        "auto = first N seconds of each turn, cold = first turn only",
+        "", "normal", "fast", "ultrafast", "auto", "cold",
     ),
     "delegation.reasoning_effort": _select(
         "Reasoning effort for delegated subagents",
