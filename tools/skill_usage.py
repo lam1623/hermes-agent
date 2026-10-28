@@ -243,6 +243,14 @@ def list_archived_skill_names() -> list[str]:
     return sorted({p.name for p in root.iterdir() if p.is_dir()}) if root.exists() else []
 
 
+def archived_skill_names(archive: Path) -> set[str]:
+    """The skills one ``.archive/`` dir holds, by SKILL.md frontmatter name: an old nested archive
+    (``.archive/<category>/<skill>/``) holds several. The dir name when it holds no SKILL.md."""
+    names = {read_skill_name(md, fallback=md.parent.name) for md in archive.rglob("SKILL.md")
+             if not is_excluded_skill_path(md.relative_to(archive), root=archive)}
+    return names or {archive.name}
+
+
 def read_skill_name(skill_md: Path, fallback: str) -> str:
     """The frontmatter ``name:`` field of a SKILL.md (first 4000 chars), else *fallback*."""
     try:
@@ -580,6 +588,72 @@ def set_pinned(skill_name: str, pinned: bool) -> bool:
 def forget(skill_name: str) -> None:
     if skill_name:
         _locked_update(skill_name, lambda d: (None, d.pop(skill_name, None) is not None), "skill_usage.forget(%s) failed: %s")
+
+
+def forget_archived(names: Iterable[str], archived_names_left: Callable[[], set[str]]) -> dict[str, dict[str, Any]]:
+    """Forget each of *names* whose record still reads archived and whose skill no archive left holds, as ONE update
+    under the usage file's lock: a skill re-created or restored under that name since owns the record, which stays.
+    The dropped records by name, for the purge's ledger entry to put back on a rollback."""
+    wanted = {n for n in names if n}
+
+    def _drop(data: dict[str, dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], bool]:
+        left = archived_names_left()
+        dropped = {n: data.pop(n) for n in sorted(wanted - left) if (data.get(n) or {}).get("state") == STATE_ARCHIVED}
+        return dropped, bool(dropped)
+    return _locked_update(", ".join(sorted(wanted)), _drop, "skill_usage.forget_archived(%s) failed: %s") or {}
+
+
+def restore_records(records: Any) -> list[str]:
+    """Put back the records a purge dropped (its ledger entry carries them) for names with no record now; a record
+    written since belongs to a skill created under that name after the purge, and stays. The restored names."""
+    if not isinstance(records, dict):
+        return []
+
+    def _put(data: dict[str, dict[str, Any]]) -> tuple[list[str], bool]:
+        restored = []
+        for name, record in sorted(records.items()):
+            if isinstance(record, dict) and name not in data:
+                data[name] = dict(record)
+                restored.append(name)
+        return restored, bool(restored)
+    return _locked_update(", ".join(sorted(records)), _put, "skill_usage.restore_records(%s) failed: %s") or []
+
+
+def _has_lifecycle_data(record: dict[str, Any]) -> bool:
+    """Written by a create, install, adopt, pin or archive, which only a skill in the local tree or the archive goes
+    through. A counters-only record can belong to a project or plugin skill no scan here can list."""
+    return bool(record.get("created_by") or record.get("agent_created") or record.get("pinned")
+                or record.get("state") in (STATE_STALE, STATE_ARCHIVED))
+
+
+def _installed_or_archived_names() -> set[str]:
+    """Every skill name still on disk or listed: SKILL.md names under each skills root and in the archive (nested
+    layouts included), the archive's dir names, hub-installed and bundled names."""
+    from agent.skill_utils import get_all_skills_dirs
+    names = _read_hub_installed_names() | _read_bundled_names()
+    for base in (b for b in get_all_skills_dirs() if b.exists()):
+        names.update(name for name, _md in _iter_skill_mds(base, local_only=False))
+    for archive in (p for p in (_archive_dir().iterdir() if _archive_dir().exists() else ()) if p.is_dir()):
+        names |= archived_skill_names(archive) | {archive.name}
+    return names
+
+
+def forget_orphan_records(*, dry_run: bool = False) -> list[str]:
+    """Drop the records whose skill is neither installed nor archived: older purges and hub uninstalls left them, and a
+    later skill of that name inherited one, ``created_by: agent`` included. Only records with lifecycle data, never a
+    plugin-qualified name. The scan runs under the usage file's lock: a record is written after its skill's files, so a
+    skill created meanwhile keeps its record. The dropped names (on a dry run, the ones it would drop)."""
+    if not _skills_dir().is_dir():  # an unmounted or missing tree would make every record look orphaned
+        return []
+
+    def _drop(data: dict[str, dict[str, Any]]) -> tuple[list[str], bool]:
+        seen = _installed_or_archived_names()
+        orphans = sorted(n for n, rec in data.items() if ":" not in n and n not in seen and _has_lifecycle_data(rec))
+        if not dry_run:
+            for name in orphans:
+                del data[name]
+        return orphans, bool(orphans) and not dry_run
+    return _locked_update("orphaned records", _drop, "skill_usage.forget_orphan_records(%s) failed: %s") or []
 
 
 # --- Archive / restore ---

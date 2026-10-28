@@ -261,6 +261,17 @@ def apply_automatic_transitions(now: Optional[datetime] = None) -> dict[str, int
     return counts
 
 
+def _drop_orphan_usage_records(dry_run: bool) -> int:
+    """Usage records whose skill is neither installed nor archived: named in the log, dropped unless a dry run."""
+    from tools import skill_usage as _u
+
+    names = _u.forget_orphan_records(dry_run=dry_run)
+    if names:
+        logger.info("curator: %s the usage records of skills neither installed nor archived: %s",
+                    "would drop" if dry_run else "dropped", ", ".join(names))
+    return len(names)
+
+
 # --- Review prompt for the forked agent ---
 
 CURATOR_DRY_RUN_BANNER = (
@@ -944,8 +955,11 @@ def run_curator_review(
             with contextlib.suppress(Exception):
                 curator_backup.prune_old_snapshots()
         counts = apply_automatic_transitions(now=start)
+    counts["usage_records_dropped"] = _drop_orphan_usage_records(dry_run)
     auto_summary = ", ".join(
-        f"{counts[key]} {label}" for key, label in (("marked_stale", "marked stale"), ("archived", "archived"), ("reactivated", "reactivated")) if counts[key]
+        f"{counts[key]} {label}" for key, label in (
+            ("marked_stale", "marked stale"), ("archived", "archived"), ("reactivated", "reactivated"),
+            ("usage_records_dropped", "stale usage records dropped")) if counts[key]
     ) or "no changes"
 
     # Persist before the LLM pass so a crash mid-review still records the run.

@@ -419,7 +419,9 @@ def _cmd_ledger(args) -> int:
 def _cmd_purge(args) -> int:
     """Delete archived skills older than curator.archive_ttl_days. Explicit only — never
     automatic; each purged skill is captured (before-blobs) and recorded as a 'purge' ledger
-    entry, so even a purge is auditable and blob-recoverable."""
+    entry, so even a purge is auditable and blob-recoverable. Its usage records go with it, or a
+    later skill of that name would inherit one (``created_by: agent`` included); the ledger entry
+    keeps them, so rolling the purge back puts them back with the files."""
     import shutil
     import time
     from hermes_cli.config import cfg_get, load_config
@@ -438,20 +440,23 @@ def _cmd_purge(args) -> int:
         return 0
     cutoff = time.time() - ttl_days * 86400
     usage = skill_usage.load_usage()
+    # Key by the SKILL.md frontmatter name: older archives were flattened under the directory
+    # name (`accelerate` for `huggingface-accelerate`), which is not the usage-record key.
+    names = {p: skill_usage.read_skill_name(p / "SKILL.md", fallback=p.name)
+             for p in archive_root.iterdir() if p.is_dir()}
+    # Every skill each archive holds: an old nested archive (`.archive/<category>/<skill>/`) holds several.
+    held = {p: skill_usage.archived_skill_names(p) for p in names}
 
     def _archived_ts(p: Path) -> float:
         # The NEWER of the record's archived_at and the dir mtime: archives made before
         # archive_skill stamped the mtime carry the skill's last-edit mtime, and a stale
         # archived_at survives a manual un-archive + re-archive. Never purge before either says so.
-        # Key by the SKILL.md frontmatter name: older archives were flattened under the directory
-        # name (`accelerate` for `huggingface-accelerate`), which is not the usage-record key.
-        rec = usage.get(skill_usage.read_skill_name(p / "SKILL.md", fallback=p.name)) or {}
+        rec = usage.get(names[p]) or {}
         archived = rec.get("state") == skill_usage.STATE_ARCHIVED
         at = skill_usage._parse_iso_timestamp(rec.get("archived_at")) if archived else None
         return max(at.timestamp(), p.stat().st_mtime) if at else p.stat().st_mtime
 
-    candidates = sorted(
-        p for p in archive_root.iterdir() if p.is_dir() and _archived_ts(p) < cutoff)
+    candidates = sorted(p for p in names if _archived_ts(p) < cutoff)
     if not candidates:
         print(f"curator: no archived skills older than {ttl_days}d.")
         return 0
@@ -472,9 +477,13 @@ def _cmd_purge(args) -> int:
         except OSError as e:
             print(f"curator: failed to purge {p.name}: {e}")
             continue
+        # Its usage records go too, once no archive left holds a skill of that name. A record no
+        # longer marked archived belongs to a skill re-created or restored under that name since.
+        forgotten = skill_usage.forget_archived(
+            held[p], lambda: set().union(*(n for q, n in held.items() if q.exists())))
         skill_ledger.append_entry(
             "purge", p.name, before=before or [], after=[], actor="user",
-            evidence={"ttl_days": ttl_days})
+            evidence={"ttl_days": ttl_days, "usage_records": forgotten})
         purged += 1
     print(f"curator: purged {purged} archived skill(s). Ledger entries recorded.")
     return 0

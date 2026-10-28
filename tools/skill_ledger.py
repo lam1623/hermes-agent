@@ -624,10 +624,22 @@ def rollback_entry(entry_id: str) -> tuple[bool, str]:
                     removed += 1
             except OSError as e:
                 logger.warning("skill_ledger: could not remove %s during rollback: %s", p, e)
+    records = _restore_purged_usage_records(entry)
     append_entry(
         "rollback", entry.get("skill", "?"), before=safety_before, after=before,
-        evidence={"rollback_target": entry_id, "restored": restored, "removed": removed})
+        evidence={"rollback_target": entry_id, "restored": restored, "removed": removed,
+                  "usage_records_restored": records})
     return True, (
         f"rolled back entry {entry_id} ({entry.get('action')} on "
-        f"'{entry.get('skill')}'): {restored} file(s) restored, {removed} removed. "
+        f"'{entry.get('skill')}'): {restored} file(s) restored, {removed} removed"
+        f"{f', {len(records)} usage record(s) restored' if records else ''}. "
         f"Safety entry {safety_id} captured the pre-rollback state.")
+
+
+def _restore_purged_usage_records(entry: dict[str, Any]) -> list[str]:
+    """A purge's entry carries the usage records it dropped; they come back with the files, or the restored skill
+    reads as unmanaged until ``hermes curator adopt``."""
+    if entry.get("action") != "purge":
+        return []
+    from tools import skill_usage
+    return skill_usage.restore_records((entry.get("evidence") or {}).get("usage_records"))
