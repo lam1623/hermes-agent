@@ -57,8 +57,10 @@ def check_api_turn(authority, ref, payload):
         # 'browser_control' is accepted and ignored: admissions persisted while the removed
         # browser-extension control existed may carry it and must still recover.
         if (set(data) - {'history', 'settings', 'turn_author', 'media', 'run_owner_scope', 'browser_control',
-                         'relay_metadata', 'resume_unanswered'}
+                         'relay_metadata', 'resume_unanswered', 'notification_category'}
                 or data.get('resume_unanswered', True) is not True
+                # Only a diagnostic is recorded; a result turn carries no category.
+                or data.get('notification_category', 'diagnostic') != 'diagnostic'
                 or not {'history', 'settings'} <= set(data)
                 or not isinstance(data.get('relay_metadata', {}), dict)
                 or (data['history'] is not None and not isinstance(data['history'], list))
@@ -191,6 +193,11 @@ def admit_api_steps(adapter, **kwargs):
         # The request's Relay metadata rides the admission to the turn it describes (main passed it
         # to ``run_conversation``); it is client JSON, so it is part of the exact-retry identity.
         payload['api_turn_v1']['relay_metadata'] = kwargs['relay_metadata']
+    if kwargs.get('notification_category') == 'diagnostic':
+        # The request's notification category (a client's ``hermes_notification_category``, or an
+        # in-process diagnostic wake) reaches the turn as ``_run_agent`` applies it without session
+        # authority: presentation only. It is client JSON, so it is part of the exact-retry identity.
+        payload['api_turn_v1']['notification_category'] = 'diagnostic'
     request_id = kwargs.get('request_id') or kwargs.get('active_run_id') or uuid.uuid4().hex
     if not isinstance(kwargs['user_message'], list):
         return (yield from _admit_api_payload(authority, adapter, sid, request_id, payload, settings, declared_key, kwargs))
@@ -445,7 +452,19 @@ def prepare_api_execution(authority, ref, payload):
     return {'adapter': adapter, 'settings': settings, 'history': data['history'] if data else None,
             'content': content, 'turn_author': data.get('turn_author') if data else None,
             'relay_metadata': data.get('relay_metadata') if data else None,
-            'resume_unanswered': bool(data and data.get('resume_unanswered'))}
+            'resume_unanswered': bool(data and data.get('resume_unanswered')),
+            'category': {'notification_category': data['notification_category']}
+                        if data and 'notification_category' in data else {}}
+
+
+def api_presentation(result, event):
+    """The API door's copy of an admitted turn's result. A muted turn (a diagnostic its policy hides:
+    the runner's verdict, or the policy for a turn that never ran) is projected the way ``_run_agent``
+    projects it without session authority, so the client gets no text. The source outcome is kept."""
+    from gateway.warning_notifications import diagnostic_wake_muted
+    if isinstance(result, dict) and diagnostic_wake_muted(event):
+        return {**result, '_notification_presentation_suppressed': True}
+    return result
 
 
 def _api_observers(authority, session_id):

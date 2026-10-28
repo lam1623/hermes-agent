@@ -266,7 +266,7 @@ async def execute_admission(authority, ref, row):
         from gateway.session_ingress_context import restore_provenance
         home = restore_provenance(authority.runner, event.source, provenance)
     from gateway.config import Platform
-    from gateway.session_api_turn import api_execution, prepare_api_execution
+    from gateway.session_api_turn import api_execution, api_presentation, prepare_api_execution
     from gateway.session_results import execution_result
     is_api = live.source.platform == Platform.API_SERVER
     if not (event.internal or is_api or live.source.platform == Platform.LOCAL):
@@ -296,6 +296,8 @@ async def execute_admission(authority, ref, row):
                     event.text = '\n'.join(part['text'] for part in prepared['content'] if part.get('type') == 'text')
                 event.allow_gateway_control = False
                 event.internal = True  # trust comes from the private binding and preclaim, never client JSON
+                # The request's notification category reaches the turn as on the legacy path: presentation only.
+                event.metadata.update(prepared['category'])
             response = await authority.runner._handle_message(event)
             result = captured.get('terminal_result', captured.get('result'))
             if result is None:
@@ -313,7 +315,7 @@ async def execute_admission(authority, ref, row):
             # The drain commits this under the stream lock so no viewer reads `terminal`
             # before the completion event exists in the replay ring.
             authority.pending_results[row['admission_id']] = {
-                'result': result, 'usage': captured.get('usage', {}),
+                'result': api_presentation(result, event) if is_api else result, 'usage': captured.get('usage', {}),
                 **({'session_usage': captured['session_usage']} if 'session_usage' in captured else {})}
             if not is_api and response:
                 adapter = authority.runner._adapter_for_source(event.source)
